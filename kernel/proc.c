@@ -26,7 +26,6 @@ void
 procinit(void)
 {
   struct proc *p;
-  
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
@@ -34,12 +33,6 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
   }
   kvminithart();
 }
@@ -84,6 +77,24 @@ allocpid() {
 
   return pid;
 }
+extern char etext[];
+pagetable_t proc_kvminit() {
+  pagetable_t pagetable = (pagetable_t) kalloc();
+  if (pagetable == 0) return 0;
+  memset(pagetable, 0, PGSIZE);
+  //mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+  if (mappages(pagetable, UART0, PGSIZE, UART0, PTE_R | PTE_W) != 0) panic("proc_kvminit");
+  if (mappages(pagetable, VIRTIO0, PGSIZE, VIRTIO0, PTE_R | PTE_W) != 0) panic("proc_kvminit");
+  if (mappages(pagetable, CLINT, 0x10000, CLINT, PTE_R | PTE_W) != 0) panic("proc_kvminit");
+  if (mappages(pagetable, PLIC, 0x400000, PLIC, PTE_R | PTE_W) != 0) panic("proc_kvminit");
+  if (mappages(pagetable, KERNBASE, (uint64)etext - KERNBASE, KERNBASE, PTE_R | PTE_X) != 0) panic("proc_kvminit");
+  if (mappages(pagetable, (uint64)etext, PHYSTOP - (uint64)etext, (uint64)etext, PTE_R | PTE_W) != 0) panic("proc_kvminit");
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  if (mappages(pagetable, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X) != 0) panic("proc_kvminit");
+  return pagetable;
+}
 
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
@@ -106,7 +117,7 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
-
+  
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     release(&p->lock);
@@ -121,6 +132,22 @@ found:
     return 0;
   }
 
+  p->kernel_pagetable = proc_kvminit();
+  
+  if (p->kernel_pagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  char *pa = kalloc();
+  if (pa == 0)
+    panic("allocproc");
+  uint64 va = KSTACK((int)(p - proc));
+
+  if (mappages(p->kernel_pagetable, va, PGSIZE, (uint64)pa, PTE_R | PTE_W) != 0) panic("allocproc");
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +155,24 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   return p;
+}
+void freewalk2(pagetable_t pagetable);
+void proc_free_kernel_pagetable(
+    pagetable_t pagetable, uint64 kstack) {
+  // // uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+  uvmunmap(pagetable, PGROUNDDOWN(UART0), 1, 0);
+  uvmunmap(pagetable, PGROUNDDOWN(VIRTIO0), 1, 0);
+  uvmunmap(pagetable, PGROUNDDOWN(CLINT), (0x10000 + PGSIZE - 1) / PGSIZE, 0);
+  uvmunmap(pagetable, PGROUNDDOWN(PLIC), (0x400000 + PGSIZE - 1) / PGSIZE, 0);
+  uvmunmap(pagetable, PGROUNDDOWN(KERNBASE),
+           ((uint64)etext - KERNBASE + PGSIZE - 1) / PGSIZE, 0);
+  uvmunmap(pagetable, PGROUNDDOWN((uint64)etext),
+           (PHYSTOP - (uint64)etext + PGSIZE - 1) / PGSIZE, 0);
+  uvmunmap(pagetable, PGROUNDDOWN(TRAMPOLINE), 1, 0);
+  if (kstack) {
+    uvmunmap(pagetable, PGROUNDDOWN(kstack), 1, 1);
+  }
+  freewalk2(pagetable);
 }
 
 // free a proc structure and the data hanging from it,
@@ -141,6 +186,9 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  if(p->kernel_pagetable)
+    proc_free_kernel_pagetable(p->kernel_pagetable, p->kstack);
+  p->kernel_pagetable = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -197,15 +245,12 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 
 // a user program that calls exec("/init")
 // od -t xC initcode
-uchar initcode[] = {
-  0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02,
-  0x97, 0x05, 0x00, 0x00, 0x93, 0x85, 0x35, 0x02,
-  0x93, 0x08, 0x70, 0x00, 0x73, 0x00, 0x00, 0x00,
-  0x93, 0x08, 0x20, 0x00, 0x73, 0x00, 0x00, 0x00,
-  0xef, 0xf0, 0x9f, 0xff, 0x2f, 0x69, 0x6e, 0x69,
-  0x74, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00
-};
+uchar initcode[] = {0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02, 0x97,
+                    0x05, 0x00, 0x00, 0x93, 0x85, 0x35, 0x02, 0x93, 0x08,
+                    0x70, 0x00, 0x73, 0x00, 0x00, 0x00, 0x93, 0x08, 0x20,
+                    0x00, 0x73, 0x00, 0x00, 0x00, 0xef, 0xf0, 0x9f, 0xff,
+                    0x2f, 0x69, 0x6e, 0x69, 0x74, 0x00, 0x00, 0x24, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 // Set up first user process.
 void
@@ -219,6 +264,9 @@ userinit(void)
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
+  copy_user2kernel(p->pagetable, p->kernel_pagetable, 0, p->sz);
+  // vmprint(p->pagetable);
+  // vmprint(p->kernel_pagetable);
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -288,7 +336,7 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
-
+  copy_user2kernel(np->pagetable, np->kernel_pagetable, 0, np->sz);
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -473,8 +521,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        // printf("user's kernel pagetable--------------------\n");
+        // vmprint(p->kernel_pagetable);
+        // printf("user's kernel pagetable--------------------\n");
+        w_satp(MAKE_SATP(p->kernel_pagetable));
+        sfence_vma();
         swtch(&c->context, &p->context);
-
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
@@ -538,7 +591,6 @@ void
 forkret(void)
 {
   static int first = 1;
-
   // Still holding p->lock from scheduler.
   release(&myproc()->lock);
 
