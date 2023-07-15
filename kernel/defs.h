@@ -183,10 +183,12 @@ int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyin_new(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+int             copyinstr_new(pagetable_t, char *, uint64, uint64);
 void            vmprint(pagetable_t);
-
-// plic.c
-void            plicinit(void);
+pte_t*          walk(pagetable_t, uint64, int);
+void            freewalk_ignoreleaf(pagetable_t);
+    // plic.c
+    void plicinit(void);
 void            plicinithart(void);
 int             plic_claim(void);
 void            plic_complete(int);

@@ -156,25 +156,13 @@ found:
 
   return p;
 }
-void freewalk2(pagetable_t pagetable);
-void proc_free_kernel_pagetable(
-    pagetable_t pagetable, uint64 kstack) {
-  // // uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
-  uvmunmap(pagetable, PGROUNDDOWN(UART0), 1, 0);
-  uvmunmap(pagetable, PGROUNDDOWN(VIRTIO0), 1, 0);
-  uvmunmap(pagetable, PGROUNDDOWN(CLINT), (0x10000 + PGSIZE - 1) / PGSIZE, 0);
-  uvmunmap(pagetable, PGROUNDDOWN(PLIC), (0x400000 + PGSIZE - 1) / PGSIZE, 0);
-  uvmunmap(pagetable, PGROUNDDOWN(KERNBASE),
-           ((uint64)etext - KERNBASE + PGSIZE - 1) / PGSIZE, 0);
-  uvmunmap(pagetable, PGROUNDDOWN((uint64)etext),
-           (PHYSTOP - (uint64)etext + PGSIZE - 1) / PGSIZE, 0);
-  uvmunmap(pagetable, PGROUNDDOWN(TRAMPOLINE), 1, 0);
-  if (kstack) {
-    uvmunmap(pagetable, PGROUNDDOWN(kstack), 1, 1);
+void proc_free_kernel_pagetable(pagetable_t pagetable, uint64 kstack) {
+  // printf("free proc_pagetble\n");
+  if(kstack) {
+    uvmunmap(pagetable, kstack, 1, 1);
   }
-  freewalk2(pagetable);
+  freewalk_ignoreleaf(pagetable);
 }
-
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -264,11 +252,8 @@ userinit(void)
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
-  copy_user2kernel(p->pagetable, p->kernel_pagetable, 0, p->sz);
-  // vmprint(p->pagetable);
-  // vmprint(p->kernel_pagetable);
   p->sz = PGSIZE;
-
+  copy_user2kernel(p->pagetable, p->kernel_pagetable, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
