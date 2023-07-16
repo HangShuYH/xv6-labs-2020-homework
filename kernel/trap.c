@@ -77,8 +77,21 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2) {
+    // printf("enter timer interrupt!\n");
+    if (p->ticks != 0) {
+      p->cur_ticks++;
+      // printf("p->cur_ticks = %d, p->ticks = %d\n", p->cur_ticks, p->ticks);
+      if (p->cur_ticks % p->ticks == 0) {
+        p->cur_ticks = 0;
+        p->sig_trapframe = *p->trapframe;
+        p->trapframe->epc = p->handler;
+      }
+    } else {
+      //important for preempt in usertest.c
+      yield();
+    }
+  }
 
   usertrapret();
 }
