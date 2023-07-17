@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include <sys/types.h>
 
 uint64
 sys_exit(void)
@@ -47,8 +48,16 @@ sys_sbrk(void)
   if(argint(0, &n) < 0)
     return -1;
   addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  struct proc* p = myproc();
+  p->sz += n;
+  if(n < 0) {
+    uint64 va = PGROUNDDOWN(p->sz);
+    uint64 end = PGROUNDUP(addr);
+    uint64 npages = (end - va) / PGSIZE;
+    uvmunmap(p->pagetable, va, npages, 1);
+  }
+  // if(growproc(n) < 0)
+  //   return -1;
   return addr;
 }
 
