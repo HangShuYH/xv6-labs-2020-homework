@@ -8,7 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
-
+#define STEAL_PAGES 1
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -21,12 +21,14 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for (int i = 0;i < NCPU;i++) {
+    initlock(&kmem[i].lock, "kmem");
+  }
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,7 +37,8 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  int i = 0;
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE, i++)
     kfree(p);
 }
 
@@ -55,11 +58,13 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  push_off();
+  int i = cpuid();
+  acquire(&kmem[i].lock);
+  r->next = kmem[i].freelist;
+  kmem[i].freelist = r;
+  release(&kmem[i].lock);
+  pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -69,13 +74,49 @@ void *
 kalloc(void)
 {
   struct run *r;
+  push_off();
+  int i = cpuid();
+  acquire(&kmem[i].lock);
+  r = kmem[i].freelist;
+  if(r) {
+    kmem[i].freelist = r->next;
+    release(&kmem[i].lock);
+  } else {
+    release(&kmem[i].lock); 
+    int id = 0;
+    for (id = 0;id < NCPU; id++) {
+      if (i == id) continue;
+      acquire(&kmem[id].lock);
+      if (!kmem[id].freelist) {
+        release(&kmem[id].lock);
+        continue;
+      }
+      r = kmem[id].freelist;
+      kmem[id].freelist = kmem[id].freelist->next;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
-
+      struct run* steal_begin = kmem[id].freelist;
+      struct run* steal_end = kmem[id].freelist;
+      int cnt = 1;
+      while(steal_end && cnt < STEAL_PAGES) {
+        steal_end = steal_end->next;
+        cnt++;
+      }
+      //steal_end is the end or cnt == STEAL_PAGES
+      acquire(&kmem[i].lock);
+      kmem[i].freelist = steal_begin;
+      release(&kmem[i].lock);
+      if (steal_end) {
+        kmem[id].freelist = steal_end->next;
+        steal_end->next = 0;
+      } else {
+        kmem[id].freelist = 0;
+      }
+      release(&kmem[id].lock);
+      break;
+    }
+    
+  }
+  pop_off();
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
