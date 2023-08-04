@@ -5,7 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 struct spinlock tickslock;
 uint ticks;
 
@@ -67,12 +70,43 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 0xd || r_scause() == 0xf) {
+    //mmap page fault
+    uint64 addr = PGROUNDDOWN(r_stval());
+    struct VMA* vma;
+    for(vma = p->vma; vma != p->vma + VMA_SIZE; vma++) {
+      if (!vma->free && addr >= vma->start && addr < vma->end) {
+        break;
+      }
+    }
+    if (vma == p->vma + VMA_SIZE) {
+      p->killed = 1;
+    } else {
+      void* pa = kalloc();
+      if (!pa) {
+        panic("mmap: kalloc failed");
+      }
+      // printf("alloc pa: %p\n", pa);
+      struct inode *ip = vma->file->ip;
+      ilock(ip);
+      if (readi(ip, 0, (uint64)pa, addr - vma->start + vma->offset, PGSIZE) == -1) {
+        panic("mmap: read file error");
+      }
+      iunlock(ip);
+      int perm = PTE_V | PTE_U;
+      if (vma->prot & PROT_READ) perm |= PTE_R;
+      if (vma->prot & PROT_WRITE) perm |= PTE_W;
+      if (mappages(p->pagetable, addr, PGSIZE, (uint64)pa, perm) == -1) {
+        panic("mmap: mappages error");
+      }
+    }
+
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
-
+  
   if(p->killed)
     exit(-1);
 

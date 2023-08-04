@@ -134,6 +134,10 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->vma_bottom = MAXVA - 2 * PGSIZE;
+  for (int i = 0;i < VMA_SIZE; i++) {
+    p->vma[i].free = 1;
+  }
   return p;
 }
 
@@ -296,6 +300,20 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for(i = 0;i < VMA_SIZE; i++) {
+    if(!p->vma[i].free) {
+      np->vma[i].free = 0;
+      np->vma[i].end = p->vma[i].end;
+      np->vma[i].start = p->vma[i].start;
+      np->vma[i].file = p->vma[i].file;
+      filedup(np->vma[i].file);
+      np->vma[i].flags = p->vma[i].flags;
+      np->vma[i].mapsize = p->vma[i].mapsize;
+      np->vma[i].offset = p->vma[i].offset;
+      np->vma[i].prot = p->vma[i].prot;
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -303,6 +321,7 @@ fork(void)
   np->state = RUNNABLE;
 
   release(&np->lock);
+
 
   return pid;
 }
@@ -333,6 +352,8 @@ reparent(struct proc *p)
   }
 }
 
+
+void vma_free(pagetable_t pagetable, uint64 addr, int length, struct VMA *vma);
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
@@ -344,6 +365,13 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  
+  struct VMA* vma;
+  for(vma = p->vma; vma != p->vma + VMA_SIZE; vma++) {
+    if(!vma->free) {
+      vma_free(p->pagetable, vma->start, vma->end - vma->start, vma);
+    }
+  }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
@@ -393,6 +421,7 @@ exit(int status)
   p->state = ZOMBIE;
 
   release(&original_parent->lock);
+
 
   // Jump into the scheduler, never to return.
   sched();

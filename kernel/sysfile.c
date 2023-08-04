@@ -16,6 +16,8 @@
 #include "file.h"
 #include "fcntl.h"
 
+
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -482,5 +484,97 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64 sys_mmap(void) {
+  uint64 addr;
+  int length, prot, flags, offset;
+  struct file* file;
+  if (argaddr(0, &addr) < 0 || argint(1, &length) < 0 || 
+      argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+      argfd(4, 0, &file) < 0 || argint(5, &offset) < 0) {
+        return -1;
+  }
+  if (addr != 0 || offset != 0) {
+    panic("mmap: addr == 0 || offset == 0");
+  }
+  struct proc* p = myproc();
+  struct VMA* vma;
+  for(vma = p->vma; vma != p->vma + VMA_SIZE; vma++) {
+    if (vma->free) {break;}
+  }
+  if (vma == p->vma + VMA_SIZE) {
+    panic("mmap: cannot find vma_buffer in proc");
+  }
+  if(!file->readable && (prot & PROT_READ)) {
+    return -1;
+  }
+  if((flags & MAP_SHARED) && !file->writable && (prot & PROT_WRITE)) {
+    return -1;
+  }
+  vma->free = 0;
+  vma->end = p->vma_bottom;
+  p->vma_bottom -= length;
+  vma->start = p->vma_bottom;
+  vma->prot = prot; 
+  vma->flags = flags;
+  vma->offset = offset;
+  vma->file = file;
+  vma->mapsize = length;
+  filedup(vma->file);
+  // printf("map: %p, length: %d\n", vma->start, length);
+  return vma->start;
+}
+
+void vma_free(pagetable_t pagetable, uint64 addr, int length, struct VMA *vma) {
+  uint64 va = addr;
+  while(va < addr + length) {
+    // printf("vma_free: %p, length: %d\n", va, PGSIZE);
+    pte_t* pte = walk(pagetable, va, 0);
+    uint64 pa = PTE2PA(*pte);
+    if(!pa) {
+      va += PGSIZE;
+      continue;
+    }
+    if (vma->flags & MAP_SHARED) {
+      struct inode *ip = vma->file->ip;
+      begin_op();
+      ilock(ip);
+      if (writei(ip, 0, pa, va - vma->start + vma->offset, PGSIZE) == -1) {
+        panic("sys_munmap: writei error");
+      }
+      iunlock(ip);
+      end_op();
+    }
+    // printf("va before uvmunmap: %p\n", va);
+    uvmunmap(pagetable, va, 1, 1);
+    va += PGSIZE;
+  }
+  vma->mapsize -= length;
+  if (vma->mapsize == 0) {
+    fileclose(vma->file);
+    vma->free = 1;
+  }
+}
+
+uint64 sys_munmap(void) {
+  uint64 addr;
+  int length;
+  if (argaddr(0, &addr) < 0 || argint(1, &length) < 0) {
+    return -1;
+  }
+  struct proc* p = myproc();
+  struct VMA* vma;
+  for(vma = p->vma; vma != p->vma + VMA_SIZE; vma++) {
+    if (!vma->free && addr >= vma->start && addr < vma->end) {
+      break;
+    }
+  }
+  // printf("unmap: addr: %p, length: %d\n", addr, length);
+  if (vma == p->vma + VMA_SIZE) {
+    panic("sys_munmap: not a valid address");
+  }
+  vma_free(p->pagetable, addr, length, vma);
   return 0;
 }
